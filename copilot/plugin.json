@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "thimble",
+  "version": "1.3.0-copilot.1",
+  "description": "thimble for GitHub Copilot CLI: a workbench canvas with cards of your data, citations a second model checks against your files, explainers, heads-ups, side threads, claims, coverage and labels.",
+  "author": {
+    "name": "Matthew Joerke (thimble); Copilot CLI port by Ayush Nangia"
+  },
+  "homepage": "https://github.com/ayushnangia/thimble/tree/main/copilot",
+  "repository": "https://github.com/ayushnangia/thimble",
+  "license": "Apache-2.0",
+  "keywords": ["thimble", "citations", "cards", "canvas", "data analysis", "verifier"]
+}

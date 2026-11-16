@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>thimble</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="ui/workbench.css">
+<script type="module" src="ui/workbench.js"></script>
+</head>
+<body>
+<header>
+  <span class="brand">thimble</span>
+  <nav id="tabs" role="tablist"></nav>
+  <span id="counts" class="dim"></span>
+</header>
+<div id="bar" class="bar">
+  <button data-act="visualize" title="Draw the last answer as a card (v)">visualize <kbd>v</kbd></button>
+  <button data-act="simplify" title="A shorter, plainer version of the last answer (s)">simplify <kbd>s</kbd></button>
+  <button data-act="cite" title="Check the selected words against the files (c)">cite <kbd>c</kbd></button>
+  <button data-act="explain" title="A short note on the selected words (e)">explain <kbd>e</kbd></button>
+  <button data-act="ask" title="Ask a side question (a)">ask <kbd>a</kbd></button>
+  <button data-act="catchup" title="Catch up on the messages since your last prompt (b)">catch-up <kbd>b</kbd></button>
+  <button data-act="verify" title="Check every unchecked citation">verify all</button>
+  <span id="toast" class="toast" role="status" aria-live="polite"></span>
+</div>
+<main id="main"></main>
+<noscript>thimble's workbench needs JavaScript.</noscript>
+</body>
+</html>
