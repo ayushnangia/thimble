@@ -101,6 +101,16 @@ Everything Copilot-specific is in this folder and in `.github/workflows/copilot-
 - `.github/workflows/copilot-upstream-sync.yml` merges `safety-research/thimble` main into the fork's main daily, runs the tests below, and pushes only when the merge is clean and the tests pass. Otherwise it opens or updates the issue "upstream sync needs a fix" (label `upstream-sync`).
 - [PORT_MAP.md](PORT_MAP.md) maps each upstream module to its counterpart here. Follow it to redo the port of a module that changed.
 
+The two workflows are kept in `copilot/workflows/` until someone with a token that has the `workflow` scope moves them into place (an OAuth token without it cannot push files under `.github/workflows/`):
+
+```sh
+gh auth refresh -s workflow
+mkdir -p .github/workflows && git mv copilot/workflows/copilot-*.yml .github/workflows/
+git commit -m "Enable the copilot workflows" && git push
+```
+
+Scheduled workflows in a fork also need Actions turned on in the fork's Actions tab.
+
 ## Tests
 
 ```sh
