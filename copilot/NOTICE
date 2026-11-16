@@ -1,0 +1,8 @@
+thimble for GitHub Copilot CLI
+Copyright 2025-2026 Matthew Joerke and the thimble contributors (https://github.com/safety-research/thimble)
+
+This is a MODIFIED FORK of safety-research/thimble, licensed under the Apache License, Version 2.0 (see ../LICENSE).
+The files in this copilot/ folder and the .github/workflows/copilot-*.yml files were added by the fork
+(https://github.com/ayushnangia/thimble) to run thimble in GitHub Copilot CLI. They reuse upstream's prompts and
+pure modules from ../plugin by path; upstream files are unchanged except for a "Copilot CLI" section appended to
+../README.md.

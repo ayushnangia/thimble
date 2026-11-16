@@ -75,3 +75,7 @@ To work on thimble's own code, see [CONTRIBUTING.md](CONTRIBUTING.md).
 ## License
 
 Apache-2.0; see [LICENSE](LICENSE).
+
+## Copilot CLI
+
+This fork ([ayushnangia/thimble](https://github.com/ayushnangia/thimble)) is a modified fork of thimble that adds a port to [GitHub Copilot CLI](https://github.com/github/copilot-cli) in [copilot/](copilot/README.md), by Ayush Nangia with Copilot. thimble itself is by Matthew Joerke ([@mjoerke](https://github.com/mjoerke)) and [safety-research/thimble](https://github.com/safety-research/thimble). Install it with `copilot plugin install ayushnangia/thimble:copilot` and run `copilot --experimental`; [copilot/PORT_MAP.md](copilot/PORT_MAP.md) maps upstream's modules to the port's.

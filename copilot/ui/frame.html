@@ -1,0 +1,284 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>thimble card</title>
+<!--
+  A card's view is code the agent wrote. This page runs it, and only here: the workbench loads this page in
+  <iframe sandbox="allow-scripts"> (no allow-same-origin), so it has an opaque origin, and the server sends it a CSP
+  with no network (default-src 'none'). It reimplements the surface of upstream cards/runner.mjs (Box, Text, Button,
+  colors, num, state, columns, keys, onKey) for the DOM, and answers the workbench with a text copy of what it drew.
+-->
+<style>
+  :root { color-scheme: dark light; --ink: #e6e3dc; --bg: #1b1b1d; --line: #3a3a3e; --btn: #2a2a2e; }
+  :root.light { --ink: #1d1c1a; --bg: #ffffff; --line: #d6d3cc; --btn: #f1efea; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--ink); }
+  body { font: 13px/1.35 ui-monospace, "Cascadia Mono", Consolas, Menlo, monospace; padding: 6px 8px; overflow: hidden; }
+  .box { display: flex; flex-direction: row; min-width: 0; }
+  .text { white-space: pre-wrap; }
+  .btn { font: inherit; color: inherit; background: var(--btn); border: 1px solid var(--line); border-radius: 3px; padding: 0 4px; cursor: pointer; text-align: left; }
+  .btn.plain { background: none; border: none; padding: 0; }
+  .btn.group { display: flex; flex-direction: column; }
+  .err { color: #f59183; white-space: pre-wrap; }
+  :root.light .err { color: #c93a28; }
+  .measure { position: absolute; visibility: hidden; white-space: pre; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+(() => {
+  'use strict'
+  const PALETTES = {
+    dark: { cat: ['#80b2ea', '#ed9a6b', '#6fd0cc', '#ed95ba', '#f0ca78'], seq: ['#5f6670', '#636f7e', '#68788d', '#6c829c', '#708bab', '#7495bb', '#789fca', '#7ca8da', '#80b2ea'], gray: '#85827a', good: '#67cda8', bad: '#f59183' },
+    light: { cat: ['#0471c8', '#e26101', '#018d82', '#c8367b', '#a08319'], seq: ['#9aa1ab', '#8c9cb0', '#7e96b4', '#6f91b8', '#608bbb', '#5085bf', '#3e7fc2', '#2978c5', '#0471c8'], gray: '#a19d94', good: '#0b7c5f', bad: '#c93a28' },
+  }
+  const BORDERS = { single: 'solid', double: 'double', round: 'solid', bold: 'solid', singleDouble: 'double', doubleSingle: 'double', classic: 'solid', arrow: 'solid', dashed: 'dashed', quote: 'solid' }
+  const KEPT = 'vsceatbrlw'
+  const parent = window.parent
+  const root = document.getElementById('root')
+  let theme = 'dark', columns = 80, rows = [], data = null, title = '', state, fns = null, keyListener = null, handlers = [], dirty = false, nodes = 0, card = null
+
+  const hex2 = (a, b, f) => { let out = '#'; for (let i = 1; i < 7; i += 2) { const x = parseInt(a.slice(i, i + 2), 16), y = parseInt(b.slice(i, i + 2), 16); out += Math.round(x + (y - x) * f).toString(16).padStart(2, '0') } return out }
+  const colors = Object.freeze({
+    get cat() { return PALETTES[theme].cat },
+    seq(t) { const S = PALETTES[theme].seq; const v = typeof t === 'number' && t === t ? Math.max(0, Math.min(1, t)) : 0; const at = v * (S.length - 1), i = Math.min(S.length - 2, Math.floor(at)); return hex2(S[i], S[i + 1], at - i) },
+    get gray() { return PALETTES[theme].gray },
+    get good() { return PALETTES[theme].good },
+    get bad() { return PALETTES[theme].bad },
+  })
+  function num(n, digits) {
+    const v = typeof n === 'number' ? n : typeof n === 'string' && n.trim() !== '' ? Number(n) : NaN
+    if (!isFinite(v)) return String(n)
+    const d = typeof digits === 'number' && digits >= 0 ? Math.min(20, Math.trunc(digits)) : 2
+    let t = Math.abs(v).toFixed(d)
+    if (typeof digits !== 'number' && t.indexOf('.') >= 0) t = t.replace(/\.?0+$/, '')
+    const dot = t.indexOf('.'), whole = dot < 0 ? t : t.slice(0, dot)
+    return (v < 0 && /[1-9]/.test(t) ? '-' : '') + whole.replace(/\B(?=(\d{3})+(?!\d))/g, ',') + (dot < 0 ? '' : t.slice(dot))
+  }
+  const element = t => function (props) {
+    const p = props && typeof props === 'object' ? props : {}
+    if (arguments.length > 1) return { type: t, props: Object.assign({}, p, { children: Array.prototype.slice.call(arguments, 1) }) }
+    return { type: t, props: p }
+  }
+  const surface = Object.freeze({
+    elements: Object.freeze({ Box: element('Box'), Text: element('Text'), Button: element('Button') }),
+    colors,
+    num,
+    get state() { return state },
+    setState(next) { state = next; dirty = true },
+    get columns() { return columns },
+    onPointer() { return () => {} },
+    onKey(fn) { keyListener = typeof fn === 'function' ? fn : null; return () => { keyListener = null } },
+  })
+  const props = () => ({ title, rows, data, columns })
+  const TAIL = "\n;return { view: typeof view === 'function' ? view : undefined, onKey: typeof onKey === 'function' ? onKey : undefined, keys: typeof keys === 'string' ? keys : '' }"
+
+  // ---------------------------------------------------------------- the drawing as DOM, and as text
+  const cells = v => (typeof v === 'number' ? `${v}ch` : typeof v === 'string' && /^\d+%$/.test(v) ? v : null)
+  const lineCells = v => (typeof v === 'number' ? `${v * 1.35}em` : null)
+  function textNode(s, inherited) { const span = document.createElement('span'); span.className = 'text'; span.textContent = s; return span }
+  function build(n, depth, inText) {
+    if (n == null || n === false || n === true) return []
+    if (Array.isArray(n)) return n.flatMap(x => build(x, depth, inText))
+    if (typeof n === 'string' || typeof n === 'number' || typeof n === 'bigint') return [{ s: String(n), el: textNode(String(n)) }]
+    if (typeof n !== 'object' || depth > 30) return []
+    const t = n.type
+    if (t !== 'Box' && t !== 'Text' && t !== 'Button') return []
+    if (inText && t !== 'Text') throw new Error(`a ${inText} holds <${t}>; draw only strings and Text inside a ${inText}: put the ${inText} inside the Box instead`)
+    if (++nodes > 20000) throw new Error('the drawing has more than 20000 elements; draw fewer rows (show a page of them)')
+    const p = n.props && typeof n.props === 'object' ? n.props : {}
+    const holdsBoxes = c => (Array.isArray(c) ? c.some(holdsBoxes) : !!c && typeof c === 'object' && (c.type === 'Box' || c.type === 'Button'))
+    if (t === 'Text') {
+      const el = document.createElement('span')
+      el.className = 'text'
+      if (typeof p.color === 'string') el.style.color = p.color
+      if (typeof p.backgroundColor === 'string') el.style.background = p.backgroundColor
+      if (p.bold) el.style.fontWeight = '700'
+      if (p.italic) el.style.fontStyle = 'italic'
+      if (p.underline || p.strikethrough) el.style.textDecoration = `${p.underline ? 'underline ' : ''}${p.strikethrough ? 'line-through' : ''}`
+      if (p.dimColor) el.style.opacity = '0.6'
+      if (p.inverse) el.style.filter = 'invert(1)'
+      const kids = build(p.children, depth + 1, 'Text')
+      kids.forEach(k => el.appendChild(k.el))
+      return [{ s: kids.map(k => k.s).join(''), el, text: true }]
+    }
+    const group = t === 'Button' && holdsBoxes(p.children)
+    let el
+    if (t === 'Button') {
+      el = document.createElement('button')
+      el.type = 'button'
+      el.className = `btn${p.plain ? ' plain' : ''}${group ? ' group' : ''}`
+      if (typeof p.onPress === 'function') { const f = p.onPress; handlers.push({ f, words: '' }); el.addEventListener('click', () => event_(() => f({}))) }
+    } else {
+      el = document.createElement('div')
+      el.className = 'box'
+      const dir = p.flexDirection === 'column' || p.flexDirection === 'column-reverse' || p.flexDirection === 'row-reverse' ? p.flexDirection : 'row'
+      el.style.flexDirection = dir
+      for (const [k, css] of [['flexGrow', 'flexGrow'], ['flexShrink', 'flexShrink']]) if (typeof p[k] === 'number') el.style[css] = String(p[k])
+      if (p.flexWrap) el.style.flexWrap = String(p.flexWrap)
+      if (p.alignItems) el.style.alignItems = String(p.alignItems)
+      if (p.justifyContent) el.style.justifyContent = String(p.justifyContent)
+      if (cells(p.width)) el.style.width = cells(p.width)
+      if (cells(p.minWidth)) el.style.minWidth = cells(p.minWidth)
+      if (lineCells(p.height)) el.style.height = lineCells(p.height)
+      const gap = typeof p.gap === 'number' ? p.gap : 0
+      if (dir.startsWith('row')) el.style.columnGap = `${typeof p.columnGap === 'number' ? p.columnGap : gap}ch`
+      else el.style.rowGap = `${(typeof p.rowGap === 'number' ? p.rowGap : gap) * 1.35}em`
+      const pad = k => (typeof p[k] === 'number' ? p[k] : undefined)
+      const px = pad('paddingLeft') ?? pad('paddingX') ?? pad('padding') ?? 0, pr = pad('paddingRight') ?? pad('paddingX') ?? pad('padding') ?? 0
+      const pt = pad('paddingTop') ?? pad('paddingY') ?? pad('padding') ?? 0, pb = pad('paddingBottom') ?? pad('paddingY') ?? pad('padding') ?? 0
+      el.style.padding = `${pt * 1.35}em ${pr}ch ${pb * 1.35}em ${px}ch`
+      const mg = k => (typeof p[k] === 'number' ? p[k] : undefined)
+      const ml = mg('marginLeft') ?? mg('marginX') ?? mg('margin') ?? 0, mr = mg('marginRight') ?? mg('marginX') ?? mg('margin') ?? 0
+      const mt = mg('marginTop') ?? mg('marginY') ?? mg('margin') ?? 0, mb = mg('marginBottom') ?? mg('marginY') ?? mg('margin') ?? 0
+      el.style.margin = `${mt * 1.35}em ${mr}ch ${mb * 1.35}em ${ml}ch`
+      if (p.borderStyle && BORDERS[p.borderStyle]) {
+        el.style.border = `1px ${BORDERS[p.borderStyle]} ${typeof p.borderColor === 'string' ? p.borderColor : 'var(--line)'}`
+        if (p.borderStyle === 'round') el.style.borderRadius = '6px'
+      }
+      if (typeof p.backgroundColor === 'string') el.style.background = p.backgroundColor
+      if (p.display === 'none') el.style.display = 'none'
+    }
+    const kids = build(p.children, depth + 1, t === 'Button' && !group ? 'Button' : false)
+    if (t === 'Button' && !kids.length && typeof p.label === 'string') kids.push({ s: p.label, el: textNode(p.label) })
+    if (t === 'Button' && !kids.map(k => k.s).join('').trim()) throw new Error('a Button has no words: give it a label, or strings or Text as its children')
+    kids.forEach(k => el.appendChild(k.el))
+    const dir = t === 'Button' ? (group ? 'column' : 'row') : el.style.flexDirection
+    const pad = n.props && typeof n.props.paddingX === 'number' ? n.props.paddingX : 0
+    return [{ s: kids.map(k => k.s).join(''), el, kids, dir, gap: typeof p.gap === 'number' ? p.gap : 0, pad, width: typeof p.width === 'number' ? p.width : 0, button: t === 'Button', display: p.display }]
+  }
+  const width = s => [...s].length
+  // a text copy laid out as the terminal would: a row's children side by side, a column's one under another
+  function linesOf(item) {
+    if (!item.kids) return item.s.split('\n')
+    if (item.display === 'none') return []
+    let out
+    if (item.dir.startsWith('row')) {
+      const parts = []
+      let run = null
+      for (const k of item.kids) {
+        if (k.text || !k.kids) { run = run ?? { s: '' }; run.s += k.s; continue }
+        if (run) { parts.push(run.s.split('\n')); run = null }
+        parts.push(linesOf(k))
+      }
+      if (run) parts.push(run.s.split('\n'))
+      if (item.dir === 'row-reverse') parts.reverse()
+      const h = Math.max(0, ...parts.map(p => p.length))
+      const ws = parts.map(p => Math.max(0, ...p.map(width)))
+      out = []
+      for (let i = 0; i < h; i++) out.push(parts.map((p, j) => (p[i] ?? '').padEnd(j === parts.length - 1 ? 0 : ws[j] + item.gap)).join(''))
+    } else {
+      out = item.kids.flatMap(k => (k.kids ? linesOf(k) : k.s.split('\n')))
+      if (item.dir === 'column-reverse') out.reverse()
+    }
+    if (item.width) out = out.map(l => (width(l) > item.width ? [...l].slice(0, item.width).join('') : l))
+    if (item.pad) out = out.map(l => ' '.repeat(item.pad) + l)
+    return item.button ? out.map((l, i) => (i === 0 ? `[${l.trim()}]` : l)) : out
+  }
+
+  function draw() {
+    let tree, pass = 0
+    do { dirty = false; handlers = []; tree = fns.view(props(), surface); pass++ } while (dirty && pass < 3)
+    nodes = 0
+    const built = build(tree, 0, false)
+    const top = built.length === 1 && built[0].kids ? built[0] : { kids: built, dir: 'column', gap: 0, pad: 0, width: 0, s: '' }
+    root.replaceChildren(...built.map(b => b.el))
+    return linesOf(top).map(l => l.replace(/\s+$/, '')).join('\n').replace(/\n{3,}/g, '\n\n').trim()
+  }
+  function measureColumns() {
+    const m = document.createElement('span')
+    m.className = 'measure'
+    m.textContent = '0'.repeat(50)
+    document.body.appendChild(m)
+    const ch = m.getBoundingClientRect().width / 50 || 8
+    m.remove()
+    return Math.max(30, Math.floor((document.documentElement.clientWidth - 16) / ch))
+  }
+  const errorOf = e => (e && typeof e === 'object' && 'message' in e ? String(e.message) : String(e))
+  const send = msg => parent.postMessage(Object.assign({ thimble: 1 }, msg), '*')
+  const height = () => send({ type: 'height', id: card && card.id, height: Math.ceil(document.documentElement.scrollHeight) })
+  function fail(e) {
+    const p = document.createElement('div')
+    p.className = 'err'
+    p.textContent = `The view failed: ${errorOf(e)}`
+    root.replaceChildren(p)
+    height()
+  }
+  // a key, a click: the view runs again; an event the view fails on is undone (the state it had before)
+  function event_(f) {
+    const before = state
+    try { f(); draw() } catch (e) { state = before; try { draw() } catch (e2) { fail(e2) } }
+    height()
+  }
+  function key(k) {
+    const f = fns && (fns.onKey || keyListener)
+    if (!f) return false
+    event_(() => f(k, surface, props()))
+    return true
+  }
+  function act(a) {
+    const s = String(a)
+    const click = /^click\s+(.+)$/i.exec(s)
+    if (click) {
+      const want = click[1].replace(/^["']|["']$/g, '').trim().toLowerCase()
+      const b = [...root.querySelectorAll('button')].find(x => x.textContent.trim().toLowerCase().includes(want))
+      if (!b) return { note: `no Button reads "${click[1]}"` }
+      b.click()
+      return {}
+    }
+    if (!/^[a-z]$/i.test(s) || KEPT.includes(s)) return { note: `"${s}" is no key a card takes (one letter, not ${KEPT.split('').join(' ')})` }
+    return key(s) ? {} : { note: 'the card takes no keys (define onKey)' }
+  }
+
+  function start(msg) {
+    card = msg.card
+    theme = msg.theme === 'light' ? 'light' : 'dark'
+    document.documentElement.classList.toggle('light', theme === 'light')
+    columns = measureColumns()
+    rows = Array.isArray(card.rows) ? card.rows : []
+    data = card.data && typeof card.data === 'object' && !Array.isArray(card.data) ? card.data : null
+    title = String(card.title || '')
+    state = undefined
+    keyListener = null
+    let got
+    try { got = new Function(`'use strict';\n${card.view}${TAIL}`)() } catch (e) { fail(e); return { ok: false, error: errorOf(e) } }
+    if (!got || typeof got.view !== 'function') { const e = 'the code defines no function view(props, surface)'; fail(e); return { ok: false, error: e } }
+    fns = got
+    let text
+    try { text = draw() } catch (e) { fail(e); return { ok: false, error: errorOf(e) } }
+    const copies = [`${rows.length} row${rows.length === 1 ? '' : 's'}, ${columns} columns wide${fns.keys ? `, keys ${fns.keys}` : ''}\n\n${text}`]
+    const first = state
+    for (const a of Array.isArray(card.actions) ? card.actions.slice(0, 12) : []) {
+      const r = act(a)
+      let t
+      try { t = draw() } catch (e) { t = `(the view failed: ${errorOf(e)})` }
+      copies.push(`after ${JSON.stringify(a)}${r.note ? ` (${r.note})` : ''}:\n${t}`)
+    }
+    if (card.actions && card.actions.length) { state = first; try { draw() } catch (e) { fail(e) } }
+    height()
+    return { ok: true, text: copies.join('\n\n'), keys: fns.keys || '' }
+  }
+
+  window.addEventListener('message', e => {
+    if (e.source !== parent) return
+    const msg = e.data
+    if (!msg || typeof msg !== 'object') return
+    if (msg.type === 'draw') {
+      const r = start(msg)
+      send({ type: 'drawn', id: card.id, version: card.version, ...r })
+    } else if (msg.type === 'key' && fns && typeof msg.key === 'string') {
+      key(msg.key)
+    }
+  })
+  window.addEventListener('keydown', e => {
+    if (e.ctrlKey || e.metaKey || e.altKey || e.key.length !== 1) return
+    const k = e.key
+    if (fns && fns.keys && fns.keys.includes(k) && !KEPT.includes(k)) { e.preventDefault(); key(k) } else send({ type: 'key', key: k })
+  })
+  new ResizeObserver(() => height()).observe(document.body)
+  send({ type: 'ready' })
+})()
+</script>
+</body>
+</html>

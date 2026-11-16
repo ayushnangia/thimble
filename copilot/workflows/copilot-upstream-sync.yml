@@ -1,0 +1,159 @@
+# Merges safety-research/thimble's main into this fork's main every day, and pushes only when the merge is clean and
+# the Copilot port's tests pass. Otherwise it opens (or updates) one issue, "upstream sync needs a fix", labelled
+# upstream-sync, with the conflicts or the failing tests and the upstream commit range. See copilot/PORT_MAP.md.
+name: copilot upstream sync
+
+on:
+  schedule:
+    - cron: '17 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: copilot-upstream-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: https://github.com/safety-research/thimble.git
+  ISSUE_TITLE: upstream sync needs a fix
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Merge upstream main
+        id: merge
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898333+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "$UPSTREAM"
+          git fetch --no-tags upstream main
+          new=$(git rev-parse upstream/main)
+          old=$(git merge-base HEAD upstream/main)
+          echo "range=${old:0:12}..${new:0:12}" >> "$GITHUB_OUTPUT"
+          git log --oneline "$old..$new" > upstream-commits.txt || true
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "status=uptodate" >> "$GITHUB_OUTPUT"
+            echo "main already holds upstream ${new:0:12}"
+            exit 0
+          fi
+          if git merge --no-edit -m "Merge safety-research/thimble main (${new:0:12})" upstream/main > merge.log 2>&1; then
+            echo "status=merged" >> "$GITHUB_OUTPUT"
+          else
+            cat merge.log
+            git diff --name-only --diff-filter=U > conflicts.txt
+            git merge --abort
+            echo "status=conflict" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Copilot port tests
+        id: tests
+        if: steps.merge.outputs.status == 'merged'
+        run: |
+          if [ ! -d copilot/test ]; then echo "result=pass" >> "$GITHUB_OUTPUT"; exit 0; fi
+          set +e
+          node --test copilot/test > test.log 2>&1
+          code=$?
+          cat test.log
+          if [ $code -eq 0 ]; then echo "result=pass" >> "$GITHUB_OUTPUT"; else echo "result=fail" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Push main
+        id: push
+        if: steps.merge.outputs.status == 'merged' && steps.tests.outputs.result == 'pass'
+        run: |
+          set +e
+          git push origin HEAD:main > push.log 2>&1
+          code=$?
+          cat push.log
+          if [ $code -eq 0 ]; then echo "result=pushed" >> "$GITHUB_OUTPUT"; else echo "result=failed" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Open or update the issue
+        if: steps.merge.outputs.status == 'conflict' || steps.tests.outputs.result == 'fail' || steps.push.outputs.result == 'failed'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RANGE: ${{ steps.merge.outputs.range }}
+          STATUS: ${{ steps.merge.outputs.status }}
+          TESTS: ${{ steps.tests.outputs.result }}
+          PUSH: ${{ steps.push.outputs.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          {
+            echo "The daily merge of [safety-research/thimble](https://github.com/safety-research/thimble) main into this fork's main did not go through, so main was not pushed."
+            echo
+            echo "- upstream range: \`$RANGE\` ([compare](https://github.com/safety-research/thimble/compare/${RANGE/../...}))"
+            echo "- run: $RUN_URL"
+            echo
+            if [ "$STATUS" = conflict ]; then
+              echo "## Merge conflicts"
+              echo
+              echo '```'
+              cat conflicts.txt
+              echo '```'
+            fi
+            if [ "$TESTS" = fail ]; then
+              echo "## Failing tests (\`node --test copilot/test\`, after the merge)"
+              echo
+              echo '```'
+              grep -E '^not ok|^# (tests|pass|fail)|error:|expected:|actual:|plugin/.* is gone' test.log | head -n 150
+              echo '```'
+              echo
+              echo "<details><summary>last lines of the log</summary>"
+              echo
+              echo '```'
+              tail -n 120 test.log
+              echo '```'
+              echo "</details>"
+            fi
+            if [ "$PUSH" = failed ]; then
+              echo "## Push failed"
+              echo
+              echo "The merge was clean and the tests passed, but the push was refused. A GITHUB_TOKEN cannot push changes to \`.github/workflows/\`; when upstream changed a workflow, merge it from a clone and push yourself."
+              echo
+              echo '```'
+              tail -n 40 push.log
+              echo '```'
+            fi
+            echo "## Upstream commits"
+            echo
+            echo '```'
+            head -n 100 upstream-commits.txt
+            echo '```'
+            echo
+            echo "## For the agent that fixes this"
+            echo
+            echo "Follow [copilot/PORT_MAP.md]($REPO_URL/blob/main/copilot/PORT_MAP.md) (section \"When upstream changes\"):"
+            echo "1. \`git fetch https://github.com/safety-research/thimble.git main\` and \`git merge FETCH_HEAD\` on a branch from main."
+            echo "2. Resolve conflicts: upstream files take upstream's version; README.md keeps both, with the \"Copilot CLI\" section last."
+            echo "3. For each upstream file in the range that PORT_MAP.md lists, update its Copilot counterpart, or the path in REQUIRED / USED / UPSTREAM_FILES."
+            echo "4. \`node --test copilot/test\` must pass. Open a pull request into main and link this issue."
+          } > issue.md
+          gh label create upstream-sync --color D93F0B --description "The daily upstream merge needs a fix" 2>/dev/null || true
+          n=$(gh issue list --state open --label upstream-sync --search "\"$ISSUE_TITLE\" in:title" --json number --jq '.[0].number')
+          if [ -n "$n" ]; then
+            gh issue edit "$n" --body-file issue.md
+            gh issue comment "$n" --body "Still failing for upstream \`$RANGE\`: $RUN_URL"
+          else
+            gh issue create --title "$ISSUE_TITLE" --label upstream-sync --body-file issue.md
+          fi
+          exit 1
+
+      - name: Close the issue once the sync is green
+        if: steps.push.outputs.result == 'pushed' || steps.merge.outputs.status == 'uptodate'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          n=$(gh issue list --state open --label upstream-sync --search "\"$ISSUE_TITLE\" in:title" --json number --jq '.[0].number')
+          if [ -n "$n" ]; then gh issue close "$n" --comment "main holds upstream ${{ steps.merge.outputs.range }} now and the Copilot tests pass."; fi
